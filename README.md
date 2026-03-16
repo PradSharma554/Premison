@@ -88,6 +88,66 @@ local-agent help
 | `local-agent fix-tests` | Aider | Run tests, detect failures, auto-fix |
 | `local-agent help` | — | Print usage information |
 
+## Architecture
+
+Premison uses a dual-backend design — each backend is chosen for what it does best:
+
+```
+local-agent (bash dispatcher)
+├── Goose (by Block)      → general tasks, chat, browser automation
+│   └── qwen3:8b via Ollama (32K context)
+└── Aider                 → code editing, analysis, refactoring
+    └── deepseek-coder:6.7b via Ollama (8K context)
+```
+
+**Goose** handles anything that isn't code editing: interactive sessions, one-off shell tasks, file operations, and browser automation (via Playwright MCP). It uses qwen3:8b, which supports native tool calling.
+
+**Aider** handles all code editing workflows: interactive coding sessions, repo analysis, feature implementation, refactoring, and test fixing. It uses deepseek-coder:6.7b-instruct, optimized for code generation.
+
+The `local-agent` script dispatches to the correct backend based on the sub-command. Goose commands (`session`, `chat`, `do`, `browse`) route to Goose; coding commands (`analyze`, `implement`, `refactor`, `fix-tests`, or no command) route to Aider.
+
+## Goose CLI Notes
+
+**Important quirk:** `goose session` does **not** accept `--provider` or `--model` as CLI flags. You must use environment variables instead:
+
+```bash
+# session/chat — uses env vars (the only way)
+GOOSE_PROVIDER=ollama GOOSE_MODEL=qwen3:8b goose session
+
+# run — accepts CLI flags
+goose run --provider ollama --model qwen3:8b -t "task"
+```
+
+This is why `local-agent` sets `GOOSE_PROVIDER` and `GOOSE_MODEL` as inline env vars for `session`/`chat`, but uses `--provider`/`--model` flags for `do`/`browse` (which use `goose run`).
+
+**Config file:** `config/goose.yaml` is copied to `~/.config/goose/config.yaml` during setup. This sets the default provider, model, mode, and extensions.
+
+**Context length:** `OLLAMA_CONTEXT_LENGTH=32768` is set in `.env` and is critical — Ollama defaults to 4096, which is far too small for Goose's tool-calling prompts.
+
+## Aider Command Details
+
+All Aider commands share these flags:
+- `--config config/.aider.conf.yml` — CLI behavior settings
+- `--model-settings-file config/.aider.model.settings.yml` — model/context config
+- `--no-auto-commits` — never auto-commit changes
+
+| Command | Script | What it does |
+|---------|--------|-------------|
+| `analyze` | `commands/analyze.sh` | Sends a repo analysis prompt — lists files, describes architecture, identifies entry points |
+| `fix-tests` | `commands/fix-tests.sh` | Auto-detects test runner (pytest / go test / npm test / make test), runs tests, captures failures, passes output to Aider for fixing |
+| `implement` | `commands/implement.sh` | Takes a feature description string, sends an implementation prompt following existing conventions |
+| `refactor` | `commands/refactor.sh` | Optional target file/dir argument — sends a refactoring prompt focused on clarity and readability without changing behavior |
+
+`fix-tests` detection order: `pytest.ini`/`setup.py`/`pyproject.toml`/`setup.cfg` → pytest, `go.mod` → go test, `package.json` → npm test, `Makefile` with `test:` target → make test.
+
+## Development Notes
+
+- **Goose config** lives at `~/.config/goose/config.yaml` (copied from `config/goose.yaml` by `setup.sh`)
+- **Goose extensions:** `developer` is always enabled in config; `playwright` is added on-demand via `--with-extension "npx -y @playwright/mcp@latest"` in the `browse` command
+- **Aider requires Python 3.12** specifically — 3.13+ has setuptools compatibility issues with aider dependencies. The setup script searches for `python3.12` first and falls back to `python3`
+- **System-wide access:** the symlink at `/opt/homebrew/bin/local-agent` points to the project's `local-agent` script, so it works from any directory
+- **Script resolution:** `local-agent` uses `readlink -f "$0"` to resolve symlinks back to the project directory, so config/venv paths always work regardless of where it's invoked from
+
 ## Configuration
 
 ### Models
@@ -179,6 +239,9 @@ aider --config config/.aider.conf.yml --model-settings-file config/.aider.model.
 
 ```
 Premison/
+├── .claude/
+│   ├── settings.json                # Claude Code project settings
+│   └── settings.local.json          # Claude Code local overrides
 ├── commands/
 │   ├── analyze.sh                   # Repo analysis sub-command
 │   ├── fix-tests.sh                 # Test fixing sub-command
