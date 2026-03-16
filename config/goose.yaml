@@ -1,0 +1,9 @@
+GOOSE_PROVIDER: ollama
+GOOSE_MODEL: qwen3:8b
+GOOSE_MODE: auto
+extensions:
+  developer:
+    enabled: true
+    name: developer
+    type: builtin
+    timeout: 300

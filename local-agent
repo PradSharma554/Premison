@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# local-agent — Local AI agent powered by Ollama + Goose + Aider
+set -euo pipefail
+
+# Resolve the real location of this script (works with symlinks)
+SCRIPT_PATH="$(readlink -f "$0")"
+PROJECT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+
+# Source environment variables
+if [[ -f "$PROJECT_DIR/.env" ]]; then
+  set -a
+  source "$PROJECT_DIR/.env"
+  set +a
+fi
+
+# Activate the Python venv (for aider)
+VENV_DIR="$PROJECT_DIR/.venv"
+if [[ -f "$VENV_DIR/bin/activate" ]]; then
+  source "$VENV_DIR/bin/activate"
+else
+  echo "Error: Python venv not found at $VENV_DIR"
+  echo "Run setup.sh first: cd $PROJECT_DIR && ./setup.sh"
+  exit 1
+fi
+
+# Health-check Ollama, auto-start if down
+check_ollama() {
+  if ! curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
+    echo "Ollama is not running. Starting it..."
+    ollama serve >/dev/null 2>&1 &
+    for i in {1..10}; do
+      sleep 1
+      if curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
+        echo "Ollama started successfully."
+        return 0
+      fi
+    done
+    echo "Error: Could not start Ollama after 10 seconds."
+    echo "Try starting it manually: ollama serve"
+    exit 1
+  fi
+}
+
+check_ollama
+
+# Goose model for general tasks
+GOOSE_MODEL="qwen3:8b"
+
+# Dispatch sub-commands
+COMMAND="${1:-}"
+
+case "$COMMAND" in
+  "")
+    # Interactive aider session (coding)
+    aider \
+      --config "$PROJECT_DIR/config/.aider.conf.yml" \
+      --model-settings-file "$PROJECT_DIR/config/.aider.model.settings.yml"
+    ;;
+
+  # --- General commands (Goose) ---
+  session)
+    # Full interactive Goose session (chat + tools + file ops)
+    GOOSE_PROVIDER=ollama GOOSE_MODEL="$GOOSE_MODEL" goose session
+    ;;
+  chat)
+    # Pure conversational mode (no tools)
+    GOOSE_PROVIDER=ollama GOOSE_MODEL="$GOOSE_MODEL" GOOSE_MODE=chat goose session
+    ;;
+  do)
+    shift
+    TASK="${1:-}"
+    if [[ -z "$TASK" ]]; then
+      echo "Error: Please provide a task description."
+      echo "Usage: local-agent do \"list files in current directory\""
+      exit 1
+    fi
+    goose run --provider ollama --model "$GOOSE_MODEL" -t "$TASK"
+    ;;
+  browse)
+    shift
+    TASK="${1:-}"
+    if [[ -z "$TASK" ]]; then
+      echo "Error: Please provide a browser task description."
+      echo "Usage: local-agent browse \"search for ollama documentation\""
+      exit 1
+    fi
+    goose run --provider ollama --model "$GOOSE_MODEL" \
+      --with-extension "npx -y @playwright/mcp@latest" \
+      -t "$TASK"
+    ;;
+
+  # --- Coding commands (Aider) ---
+  analyze)
+    exec bash "$PROJECT_DIR/commands/analyze.sh"
+    ;;
+  fix-tests)
+    exec bash "$PROJECT_DIR/commands/fix-tests.sh"
+    ;;
+  implement)
+    shift
+    exec bash "$PROJECT_DIR/commands/implement.sh" "${1:-}"
+    ;;
+  refactor)
+    shift
+    exec bash "$PROJECT_DIR/commands/refactor.sh" "${1:-}"
+    ;;
+
+  help|--help|-h)
+    cat <<'USAGE'
+local-agent — Local AI agent (Ollama + Goose + Aider)
+
+Usage:
+  GENERAL:
+    local-agent session              Full interactive AI session (chat + tools + files)
+    local-agent chat                 Chat mode (questions, explanations, no actions)
+    local-agent do "task"            Run a one-off task (file ops, shell commands, etc.)
+    local-agent browse "task"        Browser automation task
+
+  CODING:
+    local-agent                      Interactive code editing session (Aider)
+    local-agent analyze              Analyze repository structure
+    local-agent fix-tests            Detect and fix failing tests
+    local-agent implement "desc"     Implement a feature from description
+    local-agent refactor [file|dir]  Refactor code for clarity
+
+    local-agent help                 Show this help message
+
+Examples:
+  local-agent session                # Full AI session with tools
+  local-agent chat                   # Ask questions, get explanations
+  local-agent do "list all .py files"  # One-off task
+  local-agent browse "search github for ollama"  # Browser task
+  local-agent                        # Interactive code editing (Aider)
+  local-agent implement "add login"  # Implement a feature
+USAGE
+    ;;
+  *)
+    echo "Unknown command: $COMMAND"
+    echo "Run 'local-agent help' for usage."
+    exit 1
+    ;;
+esac
